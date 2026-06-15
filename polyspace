@@ -1,0 +1,127 @@
+name: Static Code Analysis (Polyspace / MISRA C)
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # Every Monday at 02:00 UTC
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/codegen/**'
+  workflow_dispatch:
+
+env:
+  MATLAB_VERSION: R2024a
+  MISRA_STANDARD: MISRA-C-2012
+
+jobs:
+  polyspace-bug-finder:
+    name: Polyspace Bug Finder + MISRA C:2012
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    strategy:
+      matrix:
+        controller: [abs_controller, tpms_controller, climate_controller]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MATLAB + Polyspace
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: ${{ env.MATLAB_VERSION }}
+          products: >
+            Simulink
+            Embedded_Coder
+            Polyspace_Bug_Finder
+            Polyspace_Code_Prover
+
+      - name: Generate C code for ${{ matrix.controller }}
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            run('scripts/generate_code.m');
+
+      - name: Run Polyspace Bug Finder
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            % Configure Polyspace for the controller
+            opts = polyspace.BugFinderOptions();
+            opts.Sources = {'src/${{ matrix.controller }}/codegen/'};
+            opts.ResultsDir = 'reports/polyspace/${{ matrix.controller }}/bugfinder';
+            opts.MisraVersion = '${{ env.MISRA_STANDARD }}';
+            opts.Language = 'C';
+            opts.CodingRulesConfig = 'config/polyspace_misra_config.json';
+            % Run analysis
+            [status, result] = polyspaceBugFinder(opts);
+            disp(result);
+            save('reports/polyspace/${{ matrix.controller }}/bugfinder_results.mat', 'result');
+
+      - name: Check for critical defects
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            load('reports/polyspace/${{ matrix.controller }}/bugfinder_results.mat');
+            % Fail on any High severity findings
+            highSeverity = result(strcmp(result.Severity, 'High'), :);
+            if ~isempty(highSeverity)
+              disp('HIGH SEVERITY DEFECTS FOUND:');
+              disp(highSeverity);
+              error('Polyspace found %d High severity defect(s)', height(highSeverity));
+            end
+            % Warn on Medium severity findings
+            medSeverity = result(strcmp(result.Severity, 'Medium'), :);
+            fprintf('Medium severity findings: %d (review required)\n', height(medSeverity));
+            disp('No High severity defects found — PASSED');
+
+      - name: Check MISRA C compliance
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            run('scripts/check_misra_compliance.m');
+
+      - name: Upload Polyspace results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: polyspace-${{ matrix.controller }}
+          path: reports/polyspace/${{ matrix.controller }}/
+          retention-days: 90
+
+  polyspace-summary:
+    name: MISRA C Summary Report
+    runs-on: ubuntu-latest
+    needs: polyspace-bug-finder
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all Polyspace results
+        uses: actions/download-artifact@v4
+        with:
+          path: reports/polyspace/
+
+      - name: Generate MISRA summary
+        run: |
+          echo "## Polyspace / MISRA C:2012 Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Controller | High Severity | Medium | MISRA Violations | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------------|--------|------------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ABS        | See artifact | —      | —                | ${{ needs.polyspace-bug-finder.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| TPMS       | See artifact | —      | —                | ${{ needs.polyspace-bug-finder.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Climate    | See artifact | —      | —                | ${{ needs.polyspace-bug-finder.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if any controller analysis failed
+        if: needs.polyspace-bug-finder.result == 'failure'
+        run: |
+          echo "::error::Polyspace analysis found High severity defects. See artifacts for details."
+          exit 1
