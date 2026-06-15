@@ -1,0 +1,112 @@
+%% generate_code.m
+% Generate production C code from all controller subsystems using Embedded Coder.
+% Targets the Arm Cortex-M7 instruction set.
+%
+% Prerequisites:
+%   - MATLAB R2024a
+%   - Embedded Coder
+%   - Arm Embedded Coder Support Package (for Cortex-M7 config)
+%
+% Usage:
+%   run('scripts/generate_code.m')
+
+%% ── Configuration ───────────────────────────────────────────────────────────
+CONTROLLERS = struct( ...
+    'name',    {'ABS',          'TPMS',          'Climate'}, ...
+    'model',   {'ABS_Controller', 'TPMS_Controller', 'Climate_Controller'}, ...
+    'srcDir',  {'src/abs_controller', 'src/tpms_controller', 'src/climate_controller'}, ...
+    'subsys',  {'ABS_Controller_Subsystem', 'TPMS_Controller_Subsystem', 'Climate_Controller_Subsystem'}, ...
+    'sampleT', {0.001, 0.010, 0.100} ...   % Sample periods: 1ms, 10ms, 100ms
+);
+
+CODEGEN_ROOT = fullfile(pwd, 'src');
+
+fprintf('\n========================================================\n');
+fprintf('  Embedded Coder — Code Generation for Cortex-M7\n');
+fprintf('  %s\n', datestr(now));
+fprintf('========================================================\n\n');
+
+%% ── Run code generation for each controller ──────────────────────────────────
+for i = 1:numel(CONTROLLERS)
+    ctrl = CONTROLLERS(i);
+    fprintf('\n── Generating code: %s ──────────────────────────────\n', ctrl.name);
+
+    modelPath = fullfile(pwd, ctrl.srcDir, [ctrl.model, '.slx']);
+    if ~isfile(modelPath)
+        warning('Model file not found: %s — skipping.', modelPath);
+        continue;
+    end
+
+    try
+        % ── Load model ────────────────────────────────────────────────────
+        load_system(modelPath);
+        modelName = ctrl.model;
+
+        % ── Configure Cortex-M7 target ────────────────────────────────────
+        set_param(modelName, 'SystemTargetFile',     'ert.tlc');
+        set_param(modelName, 'TargetLang',           'C');
+        set_param(modelName, 'ProdHWDeviceType',     'ARM Compatible->ARM Cortex-M');
+        set_param(modelName, 'ProdLongLongMode',     'on');
+
+        % ── Data type settings ────────────────────────────────────────────
+        set_param(modelName, 'DefaultUnderspecifiedDataType', 'single');
+        set_param(modelName, 'ProdEndianess',        'LittleEndian');
+        set_param(modelName, 'ProdWordSize',         '32');
+
+        % ── Code style settings ───────────────────────────────────────────
+        set_param(modelName, 'RTWVerbose',           'off');
+        set_param(modelName, 'GenerateReport',       'on');
+        set_param(modelName, 'LaunchReport',         'off');
+        set_param(modelName, 'GenerateMakefile',     'on');
+        set_param(modelName, 'MakeCommand',          'make_rtw');
+
+        % ── MISRA-compatible settings ──────────────────────────────────────
+        set_param(modelName, 'EnableMemcpy',             'off');
+        set_param(modelName, 'SupportNonFinite',         'on');
+        set_param(modelName, 'SupportContinuousTime',    'off');
+        set_param(modelName, 'EfficientFloat2IntCast',   'on');
+
+        % ── Set code generation output directory ──────────────────────────
+        codegenDir = fullfile(pwd, ctrl.srcDir, 'codegen');
+        set_param(modelName, 'CodeGenFolder', codegenDir);
+
+        % ── Build only the controller subsystem ───────────────────────────
+        subsysPath = [modelName, '/', ctrl.subsys];
+
+        % Run Code Generation Advisor checks first
+        fprintf('  Running Code Generation Advisor...\n');
+        cgAdvisor = cgv.CGV(modelName, 'en', 'sim');
+        cgAdvisor.run();
+
+        % Generate code
+        fprintf('  Generating C code...\n');
+        slbuild(subsysPath);
+
+        % ── Verify generated files exist ──────────────────────────────────
+        expectedFiles = { ...
+            fullfile(codegenDir, [ctrl.subsys, '_ert_rtw'], [ctrl.subsys, '.c']), ...
+            fullfile(codegenDir, [ctrl.subsys, '_ert_rtw'], [ctrl.subsys, '.h']), ...
+        };
+
+        for f = expectedFiles
+            if isfile(f{1})
+                fprintf('  Generated: %s\n', f{1});
+            else
+                warning('Expected file not found: %s', f{1});
+            end
+        end
+
+        fprintf('  %s code generation COMPLETE\n', ctrl.name);
+
+        % ── Close model ───────────────────────────────────────────────────
+        close_system(modelName, 0);
+
+    catch ME
+        warning('Code generation FAILED for %s: %s', ctrl.name, ME.message);
+        try, close_system(ctrl.model, 0); catch, end
+    end
+end
+
+fprintf('\n========================================================\n');
+fprintf('  Code generation complete. Files in src/*/codegen/\n');
+fprintf('========================================================\n\n');
