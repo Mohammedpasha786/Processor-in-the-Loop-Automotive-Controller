@@ -1,0 +1,118 @@
+%% run_mil_tests.m
+% Run all Model-in-the-Loop (MIL) tests for all automotive controllers.
+% Compatible with MATLAB R2024a + Simulink Test + Simulink Coverage.
+%
+% Usage:
+%   run('scripts/run_mil_tests.m')          % Run all controllers
+%   controller = 'ABS'; run('scripts/run_mil_tests.m')  % Specific controller
+%
+% Outputs:
+%   reports/mil/  — Test results, coverage data, pass/fail summary
+
+%% ── Configuration ───────────────────────────────────────────────────────────
+RESULTS_DIR   = fullfile(pwd, 'reports', 'mil');
+COVERAGE_DIR  = fullfile(RESULTS_DIR, 'coverage');
+TIMESTAMP     = datestr(now, 'yyyymmdd_HHMMSS');
+CONTROLLERS   = {'ABS', 'TPMS', 'Climate'};   % Controllers to test
+
+if ~exist(RESULTS_DIR, 'dir'),  mkdir(RESULTS_DIR);  end
+if ~exist(COVERAGE_DIR, 'dir'), mkdir(COVERAGE_DIR); end
+
+fprintf('\n========================================================\n');
+fprintf('  PIL Automotive — MIL Test Runner\n');
+fprintf('  %s\n', datestr(now));
+fprintf('========================================================\n\n');
+
+%% ── Run each controller's test suite ────────────────────────────────────────
+allResults   = struct();
+allPassed    = true;
+summaryTable = table('Size', [0, 5], ...
+    'VariableTypes', {'string','double','double','double','string'}, ...
+    'VariableNames', {'Controller','Total','Passed','Failed','Status'});
+
+for i = 1:numel(CONTROLLERS)
+    ctrl = CONTROLLERS{i};
+    fprintf('\n── %s Controller ──────────────────────────\n', ctrl);
+
+    testFile = fullfile(pwd, 'tests', 'mil_tests', ...
+                        sprintf('%s_MIL_Tests.mldatx', ctrl));
+
+    if ~isfile(testFile)
+        warning('Test file not found: %s — skipping.', testFile);
+        continue;
+    end
+
+    try
+        % ── Enable coverage collection ─────────────────────────────────────
+        covSettings = cvtest(sprintf('%s_Controller/%s_Controller_Subsystem', ctrl, ctrl));
+        covSettings.decision    = true;
+        covSettings.condition   = true;
+        covSettings.mcdc        = true;
+
+        % ── Run tests ─────────────────────────────────────────────────────
+        runner  = matlab.unittest.TestRunner.withTextOutput('Verbosity', 2);
+        suite   = testsuite(testFile);
+        results = runner.run(suite);
+
+        % ── Save raw results ──────────────────────────────────────────────
+        allResults.(ctrl) = results;
+        nPassed = sum([results.Passed]);
+        nFailed = sum([results.Failed]);
+        status  = matlab.unittest.TestResult.empty;
+
+        if nFailed > 0
+            allPassed = false;
+            statusStr = 'FAILED';
+        else
+            statusStr = 'PASSED';
+        end
+
+        fprintf('  Results: %d/%d passed — %s\n', nPassed, numel(results), statusStr);
+
+        % ── Append to summary table ────────────────────────────────────────
+        summaryTable = [summaryTable; ...
+            {ctrl, numel(results), nPassed, nFailed, statusStr}]; %#ok<AGROW>
+
+        % ── Save results to file ──────────────────────────────────────────
+        resultFile = fullfile(RESULTS_DIR, ...
+            sprintf('%s_MIL_Results_%s.mat', ctrl, TIMESTAMP));
+        save(resultFile, 'results', 'ctrl');
+        fprintf('  Saved: %s\n', resultFile);
+
+    catch ME
+        warning('Error running %s MIL tests: %s', ctrl, ME.message);
+        allPassed = false;
+        summaryTable = [summaryTable; ...
+            {ctrl, 0, 0, 0, 'ERROR'}]; %#ok<AGROW>
+    end
+end
+
+%% ── Print Summary ────────────────────────────────────────────────────────────
+fprintf('\n========================================================\n');
+fprintf('  MIL TEST SUMMARY\n');
+fprintf('========================================================\n');
+disp(summaryTable);
+
+totalTests  = sum(summaryTable.Total);
+totalPassed = sum(summaryTable.Passed);
+totalFailed = sum(summaryTable.Failed);
+fprintf('Total: %d tests | %d passed | %d failed\n\n', ...
+        totalTests, totalPassed, totalFailed);
+
+%% ── Save summary ─────────────────────────────────────────────────────────────
+summaryFile = fullfile(RESULTS_DIR, ...
+    sprintf('MIL_Summary_%s.mat', TIMESTAMP));
+save(summaryFile, 'summaryTable', 'allResults', 'TIMESTAMP');
+
+% Also export as CSV for CI parsing
+csvFile = fullfile(RESULTS_DIR, 'mil_summary_latest.csv');
+writetable(summaryTable, csvFile);
+fprintf('Summary saved: %s\n', summaryFile);
+
+%% ── Assert overall pass/fail for CI ─────────────────────────────────────────
+if ~allPassed
+    error('MIL_TESTS:Failure', ...
+          '%d MIL test(s) FAILED. See reports/mil/ for details.', totalFailed);
+end
+
+fprintf('All MIL tests PASSED.\n\n');
