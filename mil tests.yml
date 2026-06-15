@@ -1,0 +1,202 @@
+name: Model-in-the-Loop (MIL) Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'tests/mil_tests/**'
+      - 'scripts/run_mil_tests.m'
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  MATLAB_VERSION: R2024a
+  RESULTS_DIR: reports/mil
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: ABS Controller MIL Tests
+  # ─────────────────────────────────────────────
+  mil-abs:
+    name: ABS Controller MIL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: ${{ env.MATLAB_VERSION }}
+          products: >
+            Simulink
+            Simulink_Test
+            Simulink_Coverage
+            Embedded_Coder
+            Requirements_Toolbox
+
+      - name: Run ABS MIL Tests
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            run('scripts/run_mil_tests.m');
+            % Run ABS-specific test suite
+            results = runtests('tests/mil_tests/ABS_MIL_Tests.mldatx');
+            rt = table(results);
+            disp(rt);
+            % Fail CI if any test failed
+            assert(all([results.Passed]), 'One or more ABS MIL tests FAILED');
+
+      - name: Upload ABS MIL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abs-mil-results
+          path: reports/mil/ABS_*
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # Job 2: TPMS Controller MIL Tests
+  # ─────────────────────────────────────────────
+  mil-tpms:
+    name: TPMS Controller MIL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: ${{ env.MATLAB_VERSION }}
+          products: >
+            Simulink
+            Simulink_Test
+            Simulink_Coverage
+            Embedded_Coder
+            Requirements_Toolbox
+
+      - name: Run TPMS MIL Tests
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            results = runtests('tests/mil_tests/TPMS_MIL_Tests.mldatx');
+            rt = table(results);
+            disp(rt);
+            assert(all([results.Passed]), 'One or more TPMS MIL tests FAILED');
+
+      - name: Upload TPMS MIL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpms-mil-results
+          path: reports/mil/TPMS_*
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # Job 3: Climate Controller MIL Tests
+  # ─────────────────────────────────────────────
+  mil-climate:
+    name: Climate Controller MIL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: ${{ env.MATLAB_VERSION }}
+          products: >
+            Simulink
+            Simulink_Test
+            Simulink_Coverage
+            Embedded_Coder
+            Requirements_Toolbox
+
+      - name: Run Climate MIL Tests
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            results = runtests('tests/mil_tests/Climate_MIL_Tests.mldatx');
+            rt = table(results);
+            disp(rt);
+            assert(all([results.Passed]), 'One or more Climate MIL tests FAILED');
+
+      - name: Upload Climate MIL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: climate-mil-results
+          path: reports/mil/Climate_*
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # Job 4: Coverage Gate (all MIL must pass first)
+  # ─────────────────────────────────────────────
+  mil-coverage-gate:
+    name: Coverage Gate (≥90%)
+    runs-on: ubuntu-latest
+    needs: [mil-abs, mil-tpms, mil-climate]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all MIL artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: reports/mil/
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          release: ${{ env.MATLAB_VERSION }}
+          products: Simulink Simulink_Coverage
+
+      - name: Check coverage threshold
+        uses: matlab-actions/run-command@v2
+        with:
+          command: |
+            addpath(genpath('.'));
+            run('scripts/check_coverage_threshold.m');
+
+      - name: Upload combined coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mil-coverage-report
+          path: reports/mil/coverage_report.*
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # Notification on failure
+  # ─────────────────────────────────────────────
+  notify-on-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [mil-abs, mil-tpms, mil-climate, mil-coverage-gate]
+    if: failure()
+
+    steps:
+      - name: Post failure summary
+        run: |
+          echo "::error::One or more MIL test jobs failed. Check individual job logs."
+          echo "## MIL Test Failure Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ABS MIL      | ${{ needs.mil-abs.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| TPMS MIL     | ${{ needs.mil-tpms.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Climate MIL  | ${{ needs.mil-climate.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Coverage Gate| ${{ needs.mil-coverage-gate.result }} |" >> $GITHUB_STEP_SUMMARY
